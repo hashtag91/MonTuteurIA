@@ -141,6 +141,64 @@ def create_learner(name, age=15):
 
     return learner_id
 
+def initialize_conversation_table():
+    """Crée la table qui conserve les messages des conversations."""
+
+    with get_connection() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                role TEXT NOT NULL
+                    CHECK(role IN ('user', 'assistant')),
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+                FOREIGN KEY (session_id)
+                    REFERENCES sessions(id)
+                    ON DELETE CASCADE
+            )
+        """)
+
+        conn.commit()
+
+def save_conversation_message(session_id, role, content):
+    """Enregistre un message dans la base de données."""
+
+    if role not in ("user", "assistant"):
+        raise ValueError("Le rôle doit être 'user' ou 'assistant'.")
+
+    if not content or not content.strip():
+        return
+
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO conversation_messages
+                (session_id, role, content)
+            VALUES (?, ?, ?)
+            """,
+            (session_id, role, content.strip())
+        )
+
+        conn.commit()
+
+
+def get_conversation_messages(session_id):
+    """Récupère les messages d'une séance dans l'ordre chronologique."""
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT role, content, created_at
+            FROM conversation_messages
+            WHERE session_id = ?
+            ORDER BY id ASC
+            """,
+            (session_id,)
+        ).fetchall()
+
+    return [dict(row) for row in rows]
 
 # --------------------------------------------------
 # 5. AJOUTER UNE LEÇON
@@ -1061,3 +1119,43 @@ if __name__ == "__main__":
     initialize_learner_progress(learner_id)
 
     print("Progression pédagogique initialisée.")
+def get_previous_session(learner_id):
+    """Récupère la dernière séance de l'apprenante et ses messages."""
+
+    with get_connection() as conn:
+        session = conn.execute(
+            """
+            SELECT
+                sessions.id,
+                sessions.lesson_id,
+                sessions.started_at,
+                sessions.summary,
+                sessions.difficulties,
+                lessons.title AS lesson_title
+            FROM sessions
+            LEFT JOIN lessons
+                ON sessions.lesson_id = lessons.id
+            WHERE sessions.learner_id = ?
+            ORDER BY sessions.id DESC
+            LIMIT 1
+            """,
+            (learner_id,)
+        ).fetchone()
+
+        if session is None:
+            return None
+
+        messages = conn.execute(
+            """
+            SELECT role, content, created_at
+            FROM conversation_messages
+            WHERE session_id = ?
+            ORDER BY id ASC
+            """,
+            (session["id"],)
+        ).fetchall()
+
+    return {
+        "session": dict(session),
+        "messages": [dict(message) for message in messages]
+    }
