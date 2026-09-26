@@ -266,19 +266,51 @@ def set_mastery(learner_id, concept, level, notes=""):
     """
     Enregistre ou actualise le niveau de maîtrise d'une notion.
 
+    Une maîtrise déjà vérifiée (niveau 3) n'est pas rétrogradée
+    par une évaluation ultérieure moins concluante.
+
     Niveau :
-    0 = non évalué
-    1 = en difficulté
-    2 = compréhension partielle
-    3 = maîtrise vérifiée
+        0 = non évalué
+        1 = en difficulté
+        2 = compréhension partielle
+        3 = maîtrise vérifiée
     """
 
     if level not in (0, 1, 2, 3):
-        raise ValueError("Le niveau doit être compris entre 0 et 3.")
+        raise ValueError(
+            "Le niveau doit être compris entre 0 et 3."
+        )
+
+    concept = concept.strip()
+
+    if not concept:
+        raise ValueError(
+            "La notion ne peut pas être vide."
+        )
 
     with get_connection() as connection:
 
-        connection.execute("""
+        # Vérifier si une maîtrise existe déjà
+        existing = connection.execute(
+            """
+            SELECT level
+            FROM mastery
+            WHERE learner_id = ?
+              AND concept = ?
+            """,
+            (learner_id, concept)
+        ).fetchone()
+
+        # Une maîtrise déjà vérifiée ne doit pas être rétrogradée
+        if existing is not None:
+            existing_level = existing["level"]
+
+            if existing_level == 3 and level < 3:
+                return False
+
+        # Créer ou mettre à jour la maîtrise
+        connection.execute(
+            """
             INSERT INTO mastery (
                 learner_id,
                 concept,
@@ -293,7 +325,38 @@ def set_mastery(learner_id, concept, level, notes=""):
                 level = excluded.level,
                 notes = excluded.notes,
                 updated_at = CURRENT_TIMESTAMP
-        """, (learner_id, concept, level, notes))
+            """,
+            (
+                learner_id,
+                concept,
+                level,
+                notes
+            )
+        )
+
+        return True
+
+def get_all_mastery(learner_id):
+    """
+    Retourne toutes les notions évaluées pour un apprenant.
+    """
+
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                concept,
+                level,
+                notes,
+                updated_at
+            FROM mastery
+            WHERE learner_id = ?
+            ORDER BY updated_at DESC
+            """,
+            (learner_id,)
+        ).fetchall()
+
+    return [dict(row) for row in rows]
 
 
 # --------------------------------------------------
@@ -1090,35 +1153,6 @@ def get_progress_summary(learner_id):
 
     return row
 
-if __name__ == "__main__":
-    # 1. Créer les tables principales
-    initialize_database()
-
-    # 2. Créer la table de progression
-    initialize_progress_table()
-
-    # 3. Ajouter les leçons du programme
-    seed_lessons()
-
-    # 4. Retrouver ou créer le profil
-    with get_connection() as connection:
-        learner = connection.execute("""
-            SELECT id
-            FROM learner
-            LIMIT 1
-        """).fetchone()
-
-    if learner is None:
-        learner_id = create_learner("Apprenante", 15)
-        print("Profil créé. Identifiant :", learner_id)
-    else:
-        learner_id = learner["id"]
-        print("Profil existant. Identifiant :", learner_id)
-
-    # 5. Créer les entrées de progression manquantes
-    initialize_learner_progress(learner_id)
-
-    print("Progression pédagogique initialisée.")
 def get_previous_session(learner_id):
     """Récupère la dernière séance de l'apprenante et ses messages."""
 
@@ -1159,3 +1193,33 @@ def get_previous_session(learner_id):
         "session": dict(session),
         "messages": [dict(message) for message in messages]
     }
+
+if __name__ == "__main__":
+    # 1. Créer les tables principales
+    initialize_database()
+
+    # 2. Créer la table de progression
+    initialize_progress_table()
+
+    # 3. Ajouter les leçons du programme
+    seed_lessons()
+
+    # 4. Retrouver ou créer le profil
+    with get_connection() as connection:
+        learner = connection.execute("""
+            SELECT id
+            FROM learner
+            LIMIT 1
+        """).fetchone()
+
+    if learner is None:
+        learner_id = create_learner("Apprenante", 15)
+        print("Profil créé. Identifiant :", learner_id)
+    else:
+        learner_id = learner["id"]
+        print("Profil existant. Identifiant :", learner_id)
+
+    # 5. Créer les entrées de progression manquantes
+    initialize_learner_progress(learner_id)
+
+    print("Progression pédagogique initialisée.")

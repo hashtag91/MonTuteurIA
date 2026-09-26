@@ -1,5 +1,4 @@
 import os
-
 from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -19,6 +18,7 @@ from database.database import (
     get_next_lesson,
     start_lesson,
     get_previous_session,
+    get_all_mastery
 )
 import json
 from memory_context import build_learning_context
@@ -156,6 +156,20 @@ def main():
 
     # Créer les entrées de progression manquantes
     initialize_learner_progress(learner_id)
+    mastery_data = get_all_mastery(learner_id)
+
+    print("\nMaîtrises enregistrées :")
+
+    if mastery_data:
+        for mastery in mastery_data:
+            print(
+                f"- {mastery['concept']} : "
+                f"niveau {mastery['level']}"
+            )
+    else:
+        print("Aucune maîtrise enregistrée.")
+
+    mastery_context = build_mastery_context(mastery_data)
 
     # Récupérer la dernière séance avant d'en créer une nouvelle
     previous_session = get_previous_session(learner_id)
@@ -290,13 +304,13 @@ def main():
 
     finally:
         try:
-            # 1. Générer le bilan pédagogique
+            # Générer le bilan de la séance
             report = generate_session_report(
                 lesson_title,
                 conversation
             )
 
-            # 2. Enregistrer le bilan de la séance
+            # Enregistrer le bilan
             finish_session(
                 session_id,
                 summary=report["summary"],
@@ -305,27 +319,39 @@ def main():
 
             print("\nBilan pédagogique enregistré.")
 
-            # 3. Évaluer les notions abordées
+            # Évaluer les notions abordées pendant la séance
             if conversation and lesson_title:
+
                 evaluated_concepts = evaluate_mastery(
-                    system_prompt,
                     lesson_title,
                     conversation
                 )
 
-                # 4. Enregistrer les niveaux de maîtrise
                 for item in evaluated_concepts:
-                    set_mastery(
+
+                    saved = set_mastery(
                         learner_id=learner_id,
                         concept=item["concept"],
                         level=item["level"],
                         notes=item.get("notes", "")
                     )
 
+                    if saved:
+                        print(
+                            f"  - {item['concept']} : "
+                            f"niveau {item['level']}"
+                        )
+                    else:
+                        print(
+                            f"  - {item['concept']} : "
+                            f"niveau 3 déjà vérifié"
+                        )
+
                 print(
-                    f"{len(evaluated_concepts)} notion(s) "
-                    "évaluée(s) et enregistrée(s)."
+                    f"\n{len(evaluated_concepts)} notion(s) "
+                    "évaluée(s)."
                 )
+
             else:
                 print(
                     "Aucune évaluation de maîtrise : "
@@ -333,6 +359,7 @@ def main():
                 )
 
         except Exception as error:
+
             print(
                 "Impossible d'enregistrer le bilan ou "
                 "l'évaluation pédagogique :",
@@ -414,12 +441,10 @@ def generate_session_report(lesson_title, conversation):
             ),
             "difficulties": "Bilan des difficultés indisponible."
         }
-def evaluate_mastery(system_prompt, lesson_title, conversation):
+def evaluate_mastery(lesson_title, conversation):
     """
-    Évalue les notions abordées pendant la séance.
-
-    La fonction ne doit pas confondre une notion expliquée
-    avec une notion effectivement maîtrisée.
+    Analyse la conversation d'une séance et évalue uniquement
+    les notions pour lesquelles l'apprenant a fourni des preuves.
     """
 
     recent_messages = conversation[-20:]
@@ -433,39 +458,50 @@ def evaluate_mastery(system_prompt, lesson_title, conversation):
     instructions = """
         Tu es un évaluateur pédagogique prudent.
 
-        Analyse la conversation et identifie uniquement les notions
-        qui ont réellement été abordées pendant cette séance.
+        Analyse la conversation d'une séance d'apprentissage.
 
-        Pour chaque notion :
-        - donne un nom court et précis ;
-        - attribue un niveau de maîtrise ;
-        - justifie ce niveau à partir des réponses de l'apprenante.
+        Ton objectif est d'identifier les notions réellement abordées
+        et d'évaluer le niveau de maîtrise de l'apprenant.
 
         Niveaux autorisés :
-        0 = non évalué ou preuves insuffisantes ;
-        1 = en difficulté ;
-        2 = compréhension partielle ;
-        3 = maîtrise vérifiée par une réponse ou une réalisation autonome.
 
-        Règles importantes :
-        - Une notion simplement expliquée par le professeur ne prouve
-        pas que l'apprenante la maîtrise.
-        - Ne déduis pas une maîtrise à partir d'un simple « oui »,
-        d'un remerciement ou d'une réponse donnée par le professeur.
-        - N'invente aucune réponse ni aucun exercice.
-        - Si les preuves sont insuffisantes, utilise le niveau 0.
-        - Ne considère que les notions réellement abordées.
+        0 = non évalué ou preuves insuffisantes
+        1 = en difficulté
+        2 = compréhension partielle
+        3 = maîtrise vérifiée
 
-        Réponds uniquement avec un objet JSON de cette forme :
+        RÈGLES IMPORTANTES :
+
+        1. Une notion simplement expliquée par le professeur ne prouve
+        PAS que l'apprenant la maîtrise.
+
+        2. Une réponse comme "oui", "d'accord", "je comprends" ou
+        "ok" ne constitue PAS une preuve de maîtrise.
+
+        3. Une notion peut être considérée comme niveau 3 uniquement
+        lorsqu'une réponse ou une réalisation autonome de l'apprenant
+        démontre clairement sa compréhension.
+
+        4. N'invente aucune réponse de l'apprenant.
+
+        5. Ne considère que les notions réellement abordées pendant
+        cette séance.
+
+        6. Si les preuves sont insuffisantes, utilise le niveau 0.
+
+        7. Donne une justification courte basée uniquement sur la
+        conversation.
+
+        Réponds UNIQUEMENT avec un objet JSON de cette forme :
 
         {
-        "concepts": [
-            {
-            "concept": "Nom de la notion",
-            "level": 0,
-            "notes": "Justification courte basée sur la conversation"
-            }
-        ]
+            "concepts": [
+                {
+                    "concept": "Nom de la notion",
+                    "level": 0,
+                    "notes": "Justification courte"
+                }
+            ]
         }
         """
 
@@ -481,37 +517,91 @@ def evaluate_mastery(system_prompt, lesson_title, conversation):
 
     raw_result = response.output_text.strip()
 
-    # Tolérer un éventuel bloc Markdown autour du JSON
+    # Retirer éventuellement les balises Markdown
     if raw_result.startswith("```"):
         raw_result = raw_result.strip("`")
+
         if raw_result.startswith("json"):
             raw_result = raw_result[4:].strip()
 
     result = json.loads(raw_result)
 
     if not isinstance(result, dict):
-        raise ValueError("La réponse d'évaluation n'est pas un objet JSON.")
+        raise ValueError(
+            "La réponse d'évaluation n'est pas un objet JSON."
+        )
 
     concepts = result.get("concepts")
 
     if not isinstance(concepts, list):
-        raise ValueError("La réponse ne contient pas de liste 'concepts'.")
+        raise ValueError(
+            "La réponse ne contient pas de liste 'concepts'."
+        )
 
-    # Vérifier les données avant de les retourner
     for item in concepts:
-        if not isinstance(item, dict):
-            raise ValueError("Une notion évaluée est mal formée.")
 
-        if not isinstance(item.get("concept"), str) or not item["concept"].strip():
-            raise ValueError("Une notion ne possède pas de nom valide.")
+        if not isinstance(item, dict):
+            raise ValueError(
+                "Une notion évaluée est mal formée."
+            )
+
+        if not isinstance(item.get("concept"), str):
+            raise ValueError(
+                "Une notion ne possède pas de nom valide."
+            )
+
+        if not item["concept"].strip():
+            raise ValueError(
+                "Une notion ne peut pas être vide."
+            )
 
         if item.get("level") not in (0, 1, 2, 3):
-            raise ValueError("Un niveau de maîtrise est invalide.")
+            raise ValueError(
+                "Un niveau de maîtrise est invalide."
+            )
 
         if not isinstance(item.get("notes", ""), str):
-            raise ValueError("Les notes d'évaluation doivent être du texte.")
+            raise ValueError(
+                "Les notes d'évaluation doivent être du texte."
+            )
 
     return concepts
+
+def build_mastery_context(mastery_data):
+    """
+    Transforme les données de maîtrise en contexte pédagogique
+    compréhensible par le professeur IA.
+    """
+
+    if not mastery_data:
+        return (
+            "Aucune notion n'a encore été évaluée. "
+            "L'apprenant commence son parcours."
+        )
+
+    lines = [
+        "Voici l'état actuel des maîtrises de l'apprenant :"
+    ]
+
+    for mastery in mastery_data:
+
+        level = mastery["level"]
+
+        if level == 0:
+            status = "non évaluée"
+        elif level == 1:
+            status = "en difficulté"
+        elif level == 2:
+            status = "compréhension partielle"
+        else:
+            status = "maîtrise vérifiée"
+
+        lines.append(
+            f"- {mastery['concept']} : niveau {level} "
+            f"({status})."
+        )
+
+    return "\n".join(lines)
 
 if __name__ == "__main__":
     main()
